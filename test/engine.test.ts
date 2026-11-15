@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo } from '../src/engine';
+import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo, getBlameInfoForFile, lookupBlame, BlameInfo } from '../src/engine';
 
 describe('buildMarkerPattern', () => {
   it('should match TODO markers', () => {
@@ -295,5 +295,118 @@ describe('scanRepo', () => {
 
     expect(result.total).toBe(1);
     expect(result.entries[0].file).toContain('src/app.js');
+  });
+});
+
+describe('getBlameInfoForFile', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-sentry-blame-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('should return empty map for non-git directory', () => {
+    const filePath = path.join(tmpDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: test\n');
+    const result = getBlameInfoForFile(filePath);
+    expect(result.size).toBe(0);
+  });
+
+  it('should return blame info for a tracked file in a git repo', () => {
+    // Create a mini git repo in tmpDir
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    // Initialize git repo
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    // Create and commit a file
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: fix this\nline 2\nline 3\n');
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Now get blame info
+    const blameMap = getBlameInfoForFile(filePath);
+
+    expect(blameMap.size).toBeGreaterThan(0);
+    // Line 1 should have blame info
+    const line1Blame = blameMap.get(1);
+    expect(line1Blame).not.toBeNull();
+    expect(line1Blame!.author).toBe('Test User');
+    expect(line1Blame!.email).toBe('test@test.com');
+    expect(line1Blame!.commitHash).toHaveLength(40);
+    expect(line1Blame!.date).toBeDefined();
+  });
+
+  it('should return empty map for untracked file in a git repo', () => {
+    const repoDir = path.join(tmpDir, 'repo2');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    // Create an untracked file
+    const filePath = path.join(repoDir, 'untracked.js');
+    fs.writeFileSync(filePath, '// TODO: untracked\n');
+
+    const blameMap = getBlameInfoForFile(filePath);
+    expect(blameMap.size).toBe(0);
+  });
+});
+
+describe('lookupBlame', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-sentry-lookup-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('should return null for non-git file', () => {
+    const filePath = path.join(tmpDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: test\n');
+    const cache = new Map<string, Map<number, BlameInfo>>();
+    const result = lookupBlame(cache, filePath, 1);
+    expect(result).toBeNull();
+  });
+
+  it('should cache blame results for the same file', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: fix this\nline 2\n');
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    const cache = new Map<string, Map<number, BlameInfo>>();
+
+    // First lookup
+    const result1 = lookupBlame(cache, filePath, 1);
+    expect(result1).not.toBeNull();
+    expect(cache.size).toBe(1); // One file in cache
+
+    // Second lookup should use cache
+    const result2 = lookupBlame(cache, filePath, 2);
+    expect(result2).not.toBeNull();
+    expect(cache.size).toBe(1); // Still one file in cache (cached)
   });
 });

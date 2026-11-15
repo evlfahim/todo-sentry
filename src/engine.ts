@@ -5,7 +5,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 export interface TodoMarker {
   file: string;
@@ -135,8 +135,136 @@ export function scanFile(filePath: string, pattern: RegExp): TodoMarker[] {
 }
 
 /**
+ * Parse porcelain blame output for a single file into a map of line -> BlameInfo.
+ *
+ * git blame --line-porcelain output looks like:
+ *   <hash> <line> <finalLine> <numLines>
+ *   author Name
+ *   author-mail <email>
+ *   author-time <timestamp>
+ *   author-tz <tz>
+ *   ...
+ *   <blank line>
+ *   <content line>
+ *
+ * We collect the current blame record and emit it when we hit a new record
+ * or reach the end of input.
+ */
+interface PorcelainLine {
+  hash: string;
+  author: string;
+  email: string;
+  authorTime: number;
+  authorTz: string;
+  line: number;
+}
+
+function parseBlamePorcelain(output: string): Map<number, BlameInfo> {
+  const result = new Map<number, BlameInfo>();
+  const lines = output.split('\n');
+  let current: PorcelainLine | null = null;
+
+  for (const line of lines) {
+    // New record starts with a 40-char hex hash
+    if (/^[0-9a-f]{40}\s/.test(line)) {
+      // Save previous record if any
+      if (current) {
+        const date = new Date(current.authorTime * 1000);
+        result.set(current.line, {
+          author: current.author,
+          email: current.email,
+          date: date.toISOString(),
+          commitHash: current.hash,
+        });
+      }
+      const parts = line.trim().split(/\s+/);
+      current = {
+        hash: parts[0],
+        line: parseInt(parts[1], 10),
+        author: '',
+        email: '',
+        authorTime: 0,
+        authorTz: '',
+      };
+      continue;
+    }
+
+    if (!current) continue;
+
+    if (line.startsWith('author ')) {
+      current.author = line.slice(7);
+    } else if (line.startsWith('author-mail ')) {
+      current.email = line.slice(12).replace(/^<|>$/g, '');
+    } else if (line.startsWith('author-time ')) {
+      current.authorTime = parseInt(line.slice(12), 10);
+    } else if (line.startsWith('author-tz ')) {
+      current.authorTz = line.slice(10);
+    }
+  }
+
+  // Don't forget the last record
+  if (current) {
+    const date = new Date(current.authorTime * 1000);
+    result.set(current.line, {
+      author: current.author,
+      email: current.email,
+      date: date.toISOString(),
+      commitHash: current.hash,
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Run git blame --line-porcelain on a file and return a map of line number -> BlameInfo.
+ * Returns an empty map if git is not available or the file is not tracked.
+ */
+export function getBlameInfoForFile(filePath: string): Map<number, BlameInfo> {
+  try {
+    const output = execFileSync('git', ['blame', '--line-porcelain', '--', filePath], {
+      cwd: path.dirname(filePath),
+      timeout: 10000,
+      encoding: 'utf-8',
+    });
+    return parseBlamePorcelain(output);
+  } catch {
+    // Not a git repo, file not tracked, or git not installed
+    return new Map();
+  }
+}
+
+/**
+ * Look up blame info for a specific line in a file.
+ * Uses a cached blame map to avoid repeated git calls.
+ */
+export function lookupBlame(
+  blameCache: Map<string, Map<number, BlameInfo>>,
+  filePath: string,
+  line: number,
+): BlameInfo | null {
+  let fileBlame = blameCache.get(filePath);
+  if (!fileBlame) {
+    fileBlame = getBlameInfoForFile(filePath);
+    blameCache.set(filePath, fileBlame);
+  }
+  return fileBlame.get(line) ?? null;
+}
+
+/**
+ * Calculate the age in days from a date string.
+ */
+function calculateAgeDays(dateStr: string): number {
+  const now = new Date();
+  const then = new Date(dateStr);
+  const diffMs = now.getTime() - then.getTime();
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+
+/**
  * Scan a repository for TODO markers.
- * Returns structured results with file, line, text, and marker info.
+ * Enriches results with git blame info (author, date, commit hash) and
+ * staleness flags.
  */
 export async function scanRepo(options: ScanOptions = {}): Promise<ScanResult> {
   const {
@@ -168,14 +296,22 @@ export async function scanRepo(options: ScanOptions = {}): Promise<ScanResult> {
     allMarkers.push(...fileMarkers);
   }
 
-  // Build TodoEntry objects with blame info (step 3) and staleness (step 4)
-  // For now, entries without blame info
-  const entries: TodoEntry[] = allMarkers.map(m => ({
-    ...m,
-    blame: null,
-    ageDays: null,
-    isStale: false,
-  }));
+  // Batch git blame: collect unique files and fetch blame for each
+  const blameCache = new Map<string, Map<number, BlameInfo>>();
+
+  // Build TodoEntry objects with blame info and staleness
+  const entries: TodoEntry[] = allMarkers.map(m => {
+    const blame = lookupBlame(blameCache, m.file, m.line);
+    const ageDays = blame ? calculateAgeDays(blame.date) : null;
+    const isStale = blame !== null && staleDays !== undefined && ageDays !== null && ageDays > staleDays;
+
+    return {
+      ...m,
+      blame,
+      ageDays,
+      isStale,
+    };
+  });
 
   return {
     entries,
