@@ -68,6 +68,8 @@ export interface ScanOptions {
   extensions?: string[];
   /** Only scan files changed since HEAD (default: false). */
   changedOnly?: boolean;
+  /** Base ref to compare against when changedOnly is true (default: 'HEAD'). */
+  base?: string;
   /** Staleness threshold in days; entries older than this get isStale=true (default: 90). */
   staleDays?: number;
 }
@@ -259,19 +261,27 @@ export function scanRepo(options: ScanOptions = {}): ScanResult {
     markers = DEFAULT_MARKERS,
     extensions = [],
     changedOnly = false,
+    base = 'HEAD',
     staleDays = 90,
   } = options;
 
   const pattern = buildMarkerPattern(markers);
   const rootDir = path.resolve(root);
 
-  // If only changed files mode, we'd use git diff here (step 9)
-  // For now, scan all files
+  // If only changed files mode, use git diff to get modified paths
   let files: string[];
 
   if (changedOnly) {
-    // Placeholder for git diff integration (step 9)
-    files = [];
+    const relativePaths = getChangedFiles(rootDir, base);
+    // Convert relative paths from git diff to absolute paths
+    files = relativePaths.map(p => path.join(rootDir, p));
+    // Apply extension filter if specified
+    if (extensions.length > 0) {
+      files = files.filter(f => {
+        const ext = path.extname(f).toLowerCase();
+        return extensions.includes(ext);
+      });
+    }
   } else {
     files = collectFiles(rootDir, extensions);
   }
@@ -304,6 +314,52 @@ export function scanRepo(options: ScanOptions = {}): ScanResult {
 }
 
 // ── Internal Helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Get list of changed files relative to the repo root using git diff.
+ * Returns an array of relative file paths that have been modified, added, or are newly created (untracked).
+ * Skips deleted files since they can't be scanned.
+ *
+ * @param rootDir - Absolute path to the git repository root.
+ * @param base - Base ref to compare against (default: 'HEAD').
+ * @returns Array of relative file paths that have changed.
+ */
+export function getChangedFiles(rootDir: string, base: string = 'HEAD'): string[] {
+  const changedFiles: string[] = [];
+
+  // Get staged and modified files (not deleted)
+  try {
+    const output1 = execFileSync('git', ['diff', '--name-only', '--diff-filter=ACMR', base, '--'], {
+      cwd: rootDir,
+      timeout: 10000,
+      encoding: 'utf-8',
+    }).trim();
+
+    if (output1) {
+      changedFiles.push(...output1.split('\n').filter(p => p.length > 0));
+    }
+  } catch {
+    // Not a git repo or git diff failed
+  }
+
+  // Get untracked files (newly created, not yet staged)
+  try {
+    const output2 = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
+      cwd: rootDir,
+      timeout: 10000,
+      encoding: 'utf-8',
+    }).trim();
+
+    if (output2) {
+      changedFiles.push(...output2.split('\n').filter(p => p.length > 0));
+    }
+  } catch {
+    // git ls-files failed, ignore
+  }
+
+  // Deduplicate
+  return [...new Set(changedFiles)];
+}
 
 /**
  * Recursively collect file paths under a directory.

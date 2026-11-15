@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo, getBlameInfoForFile, lookupBlame, calculateAgeDays, groupByFile, groupByAuthor, BlameInfo, TodoEntry } from '../src/engine';
+import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo, getBlameInfoForFile, lookupBlame, calculateAgeDays, groupByFile, groupByAuthor, BlameInfo, TodoEntry, getChangedFiles } from '../src/engine';
 
 describe('buildMarkerPattern', () => {
   it('should match TODO markers', () => {
@@ -790,5 +790,308 @@ describe('scanResult grouping', () => {
 
     expect(result2.byAuthor.get('Bob')).toHaveLength(1);
     expect(result2.byAuthor.get('Bob')![0].file).toContain('b.js');
+  });
+});
+
+describe('getChangedFiles', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-sentry-changed-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('should return empty array for non-git directory', () => {
+    const result = getChangedFiles(tmpDir);
+    expect(result).toEqual([]);
+  });
+
+  it('should return empty array when no changes exist', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: initial\n');
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    const result = getChangedFiles(repoDir);
+    expect(result).toEqual([]);
+  });
+
+  it('should return added files', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    // Initial commit
+    const initialFile = path.join(repoDir, 'initial.js');
+    fs.writeFileSync(initialFile, '// initial\n');
+    execFileSync('git', ['add', 'initial.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Add a new file (uncommitted)
+    const newFile = path.join(repoDir, 'new.js');
+    fs.writeFileSync(newFile, '// TODO: new file\n');
+
+    const result = getChangedFiles(repoDir);
+    expect(result).toContain('new.js');
+  });
+
+  it('should return modified files', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// initial content\n');
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Modify the file (uncommitted)
+    fs.writeFileSync(filePath, '// TODO: modified content\n');
+
+    const result = getChangedFiles(repoDir);
+    expect(result).toContain('test.js');
+  });
+
+  it('should not include deleted files', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'deleted.js');
+    fs.writeFileSync(filePath, '// TODO: will be deleted\n');
+    execFileSync('git', ['add', 'deleted.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Delete the file (uncommitted)
+    fs.unlinkSync(filePath);
+
+    const result = getChangedFiles(repoDir);
+    expect(result).not.toContain('deleted.js');
+  });
+
+  it('should return relative paths', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const initialFile = path.join(repoDir, 'initial.js');
+    fs.writeFileSync(initialFile, '// initial\n');
+    execFileSync('git', ['add', 'initial.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Add a new file in a subdirectory
+    const subDir = path.join(repoDir, 'src');
+    fs.mkdirSync(subDir, { recursive: true });
+    const newFile = path.join(subDir, 'new.js');
+    fs.writeFileSync(newFile, '// TODO: nested\n');
+
+    const result = getChangedFiles(repoDir);
+    expect(result).toContain('src/new.js');
+  });
+
+  it('should support custom base ref', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// initial\n');
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Create a second commit
+    fs.writeFileSync(filePath, '// second\n');
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'second'], { cwd: repoDir });
+
+    // Compare against the first commit
+    const firstCommit = execFileSync('git', ['rev-parse', 'HEAD~1'], { cwd: repoDir, encoding: 'utf-8' }).trim();
+    const result = getChangedFiles(repoDir, firstCommit);
+    expect(result).toContain('test.js');
+  });
+});
+
+describe('changedOnly mode', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-sentry-changedonly-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('should only scan changed files when changedOnly is true', async () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    // Initial commit with a file that has no TODOs
+    const initialFile = path.join(repoDir, 'initial.js');
+    fs.writeFileSync(initialFile, '// no todos here\n');
+    execFileSync('git', ['add', 'initial.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Add a new file with a TODO (uncommitted)
+    const newFile = path.join(repoDir, 'new.js');
+    fs.writeFileSync(newFile, '// TODO: fix this\n');
+
+    // Add another file with a TODO (uncommitted)
+    const anotherFile = path.join(repoDir, 'another.js');
+    fs.writeFileSync(anotherFile, '// FIXME: broken\n');
+
+    // Scan with changedOnly — should only find TODOs in new files
+    const result = await scanRepo({ root: repoDir, changedOnly: true });
+
+    expect(result.total).toBe(2);
+    expect(result.entries.map(e => path.basename(e.file)).sort()).toEqual(['another.js', 'new.js']);
+  });
+
+  it('should return empty result when no files are changed', async () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: initial\n');
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // No changes — changedOnly should return empty
+    const result = await scanRepo({ root: repoDir, changedOnly: true });
+
+    expect(result.total).toBe(0);
+    expect(result.entries).toHaveLength(0);
+  });
+
+  it('should work with changedOnly and extension filter', async () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    // Initial commit
+    const initialFile = path.join(repoDir, 'initial.js');
+    fs.writeFileSync(initialFile, '// initial\n');
+    execFileSync('git', ['add', 'initial.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Add new files with different extensions
+    const newJs = path.join(repoDir, 'new.js');
+    fs.writeFileSync(newJs, '// TODO: js\n');
+    const newPy = path.join(repoDir, 'new.py');
+    fs.writeFileSync(newPy, '// TODO: py\n');
+    const newTs = path.join(repoDir, 'new.ts');
+    fs.writeFileSync(newTs, '// TODO: ts\n');
+
+    // changedOnly with extension filter — should only find .js files
+    const result = await scanRepo({ root: repoDir, changedOnly: true, extensions: ['.js'] });
+
+    expect(result.total).toBe(1);
+    expect(result.entries[0].file).toContain('new.js');
+  });
+
+  it('should work with changedOnly and custom markers', async () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    // Initial commit
+    const initialFile = path.join(repoDir, 'initial.js');
+    fs.writeFileSync(initialFile, '// initial\n');
+    execFileSync('git', ['add', 'initial.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Add new file with BUG marker (not default TODO)
+    const newFile = path.join(repoDir, 'new.js');
+    fs.writeFileSync(newFile, '// BUG: something wrong\n// TODO: also here\n');
+
+    // changedOnly with custom markers — should only find BUG
+    const result = await scanRepo({ root: repoDir, changedOnly: true, markers: ['BUG'] });
+
+    expect(result.total).toBe(1);
+    expect(result.entries[0].marker).toBe('BUG');
+  });
+
+  it('should work with changedOnly in non-git directory', async () => {
+    // Non-git directory — changedOnly should gracefully return empty
+    const result = await scanRepo({ root: tmpDir, changedOnly: true });
+
+    expect(result.total).toBe(0);
+    expect(result.entries).toHaveLength(0);
+  });
+
+  it('should include blame info for changed tracked files', async () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    // Initial commit
+    const initialFile = path.join(repoDir, 'initial.js');
+    fs.writeFileSync(initialFile, '// initial\n');
+    execFileSync('git', ['add', 'initial.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    // Add a new file with a TODO
+    const newFile = path.join(repoDir, 'new.js');
+    fs.writeFileSync(newFile, '// TODO: fix this\n');
+
+    const result = await scanRepo({ root: repoDir, changedOnly: true });
+
+    expect(result.total).toBe(1);
+    // The new file is untracked, so blame should be null
+    expect(result.entries[0].blame).toBeNull();
+    expect(result.entries[0].ageDays).toBeNull();
   });
 });
