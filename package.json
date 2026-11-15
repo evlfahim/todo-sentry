@@ -1,0 +1,24 @@
+{
+  "name": "todo-sentry",
+  "version": "1.0.0",
+  "description": "Zero-dependency CLI that scans codebases for TODO markers, correlates them with git blame for age and author, and exports a grouped Markdown task list for triage.",
+  "main": "dist/engine.js",
+  "types": "dist/engine.d.ts",
+  "bin": {
+    "todo-sentry": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "keywords": ["todo", "fixme", "hack", "xxx", "git-blame", "cli"],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}

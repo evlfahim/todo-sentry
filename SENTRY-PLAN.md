@@ -29,7 +29,7 @@ TypeScript, Node.js (Zero Dependencies via child_process and fs), Vitest
 Core engine in src/engine.ts exports scanRepo function; VS Code plugin imports this module to run scans in the background and display results in a TreeView or Markdown preview.
 
 ## Steps
-- [ ] 1. Initialize TypeScript project with zero dependencies, configure Vitest, and verify build/test pipeline with npm test.
+- [x] 1. Initialize TypeScript project with zero dependencies, configure Vitest, and verify build/test pipeline with npm test.
 - [ ] 2. Implement regex-based scanner in src/engine.ts that extracts TODO/FIXME/HACK/XXX markers with line numbers and text, passing unit tests.
 - [ ] 3. Add git blame integration to src/engine.ts that fetches author, date, and commit hash for each marked line, verifying output with node dist/cli.js scan .
 - [ ] 4. Implement age calculation logic and staleness threshold filtering, enabling --stale-days flag to flag old comments.
