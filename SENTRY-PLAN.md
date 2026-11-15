@@ -38,7 +38,7 @@ Core engine in src/engine.ts exports scanRepo function; VS Code plugin imports t
 - [x] 7. Add JSON output format and CLI argument parsing for markers, extensions, and output format, passing integration tests.
 - [x] 8. Refactor src/engine.ts to export a clean ScanOptions interface and scanRepo function, isolating core logic from CLI.
 - [x] 9. Implement only changed files mode using git diff to restrict scanning to modified paths, useful for PR workflows.
-- [ ] 10. Add support for custom markers and file extensions via CLI flags, verifying with node dist/cli.js scan . --markers BUG --ext py.
+- [x] 10. Add support for custom markers and file extensions via CLI flags, verifying with node dist/cli.js scan . --markers BUG --ext py.
 - [ ] 11. Optimize git blame performance by batching file paths and handling errors gracefully for unreadable files or non-git dirs.
 - [ ] 12. Create a stub src/plugin-api.ts that re-exports the engine, demonstrating how a VS Code extension would import and call scanRepo.
 - [ ] 13. Run full test suite and linting checks to ensure code quality and zero-dependency compliance.
