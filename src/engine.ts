@@ -141,6 +141,9 @@ export function scanFile(filePath: string, pattern: RegExp): TodoMarker[] {
 /**
  * Run git blame --line-porcelain on a file and return a map of line number -> BlameInfo.
  * Returns an empty map if git is not available or the file is not tracked.
+ *
+ * @deprecated Use batchGetBlameInfoForFiles() for better performance when processing multiple files.
+ * Kept for backward compatibility.
  */
 export function getBlameInfoForFile(filePath: string): Map<number, BlameInfo> {
   try {
@@ -157,8 +160,206 @@ export function getBlameInfoForFile(filePath: string): Map<number, BlameInfo> {
 }
 
 /**
+ * Check if a file exists and is readable.
+ */
+function isFileReadable(filePath: string): boolean {
+  try {
+    return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Batch git blame for multiple files in a single git invocation.
+ *
+ * This is significantly faster than calling git blame once per file because
+ * it avoids spawning a new child process for each file. Git blame accepts
+ * multiple file paths and produces combined porcelain output.
+ *
+ * @param rootDir - Absolute path to the git repository root.
+ * @param filePaths - Array of absolute file paths to get blame info for.
+ * @returns A map where each key is an absolute file path and the value is
+ *          a map of line number -> BlameInfo. Unreadable or untracked files
+ *          are silently skipped.
+ */
+export function batchGetBlameInfoForFiles(
+  rootDir: string,
+  filePaths: string[],
+): Map<string, Map<number, BlameInfo>> {
+  const result = new Map<string, Map<number, BlameInfo>>();
+
+  // Filter to only existing, readable files
+  const readableFiles = filePaths.filter(isFileReadable);
+
+  if (readableFiles.length === 0) {
+    return result;
+  }
+
+  // Get all tracked files in the repo once (single git call)
+  let trackedFiles: Set<string>;
+  try {
+    const output = execFileSync('git', ['ls-files'], {
+      cwd: rootDir,
+      timeout: 5000,
+      encoding: 'utf-8',
+    }).trim();
+    trackedFiles = new Set(output.split('\n').filter(p => p.length > 0));
+  } catch {
+    // Not a git repo or git ls-files failed — skip blame entirely
+    return result;
+  }
+
+  // Filter input files to only those that are tracked
+  const relativePaths: string[] = [];
+  for (const absPath of readableFiles) {
+    const relPath = path.relative(rootDir, absPath);
+    if (trackedFiles.has(relPath)) {
+      relativePaths.push(relPath);
+    }
+  }
+
+  if (relativePaths.length === 0) {
+    return result;
+  }
+
+  try {
+    // Single git blame invocation for all tracked files — much faster than per-file calls
+    const output = execFileSync('git', ['blame', '--line-porcelain', '--', ...relativePaths], {
+      cwd: rootDir,
+      timeout: 30000,
+      encoding: 'utf-8',
+    });
+
+    // Parse combined porcelain output, tracking which file each record belongs to
+    const parsed = parseBlamePorcelainForFiles(output, rootDir, relativePaths);
+    for (const [absPath, lineMap] of parsed) {
+      result.set(absPath, lineMap);
+    }
+  } catch {
+    // Git blame failed — could be non-git dir, missing files, etc.
+    // Return whatever we have so far (empty map)
+  }
+
+  return result;
+}
+
+/**
+ * Parse porcelain blame output that was generated for multiple files.
+ * Git blame with multiple files interleaves records from each file.
+ * The first file's records appear before the first "filename" line.
+ * Each subsequent file is preceded by a "filename <path>" line.
+ *
+ * @param output - Combined porcelain blame output from git blame with multiple files.
+ * @param rootDir - Root directory to convert relative paths to absolute.
+ * @param relativePaths - The relative file paths that were passed to git blame, in order.
+ * @returns Map of absolute file path -> line number -> BlameInfo.
+ */
+function parseBlamePorcelainForFiles(
+  output: string,
+  rootDir: string,
+  relativePaths: string[],
+): Map<string, Map<number, BlameInfo>> {
+  const result = new Map<string, Map<number, BlameInfo>>();
+  const lines = output.split('\n');
+  let currentFileIndex = 0; // index into relativePaths
+  let current: PorcelainLine | null = null;
+
+  // Map from index to absolute path
+  const indexToAbsPath = relativePaths.map(p => path.resolve(rootDir, p));
+
+  for (const line of lines) {
+    // Detect file boundary — git blame outputs "filename <path>" between file groups
+    if (/^filename\s/.test(line)) {
+      // Save previous record if any
+      if (current) {
+        const absPath = indexToAbsPath[currentFileIndex];
+        if (absPath) {
+          const date = new Date(current.authorTime * 1000);
+          const lineMap = result.get(absPath) ?? new Map();
+          lineMap.set(current.line, {
+            author: current.author,
+            email: current.email,
+            date: date.toISOString(),
+            commitHash: current.hash,
+          });
+          result.set(absPath, lineMap);
+        }
+      }
+
+      // Advance to next file
+      currentFileIndex++;
+      current = null;
+      continue;
+    }
+
+    // New record starts with a 40-char hex hash
+    if (/^[0-9a-f]{40}\s/.test(line)) {
+      // Save previous record if any
+      if (current) {
+        const absPath = indexToAbsPath[currentFileIndex];
+        if (absPath) {
+          const date = new Date(current.authorTime * 1000);
+          const lineMap = result.get(absPath) ?? new Map();
+          lineMap.set(current.line, {
+            author: current.author,
+            email: current.email,
+            date: date.toISOString(),
+            commitHash: current.hash,
+          });
+          result.set(absPath, lineMap);
+        }
+      }
+      const parts = line.trim().split(/\s+/);
+      current = {
+        hash: parts[0],
+        line: parseInt(parts[1], 10),
+        author: '',
+        email: '',
+        authorTime: 0,
+        authorTz: '',
+      };
+      continue;
+    }
+
+    if (!current) continue;
+
+    if (line.startsWith('author ')) {
+      current.author = line.slice(7);
+    } else if (line.startsWith('author-mail ')) {
+      current.email = line.slice(12).replace(/^<|>$/g, '');
+    } else if (line.startsWith('author-time ')) {
+      current.authorTime = parseInt(line.slice(12), 10);
+    } else if (line.startsWith('author-tz ')) {
+      current.authorTz = line.slice(10);
+    }
+  }
+
+  // Don't forget the last record
+  if (current) {
+    const absPath = indexToAbsPath[currentFileIndex];
+    if (absPath) {
+      const date = new Date(current.authorTime * 1000);
+      const lineMap = result.get(absPath) ?? new Map();
+      lineMap.set(current.line, {
+        author: current.author,
+        email: current.email,
+        date: date.toISOString(),
+        commitHash: current.hash,
+      });
+      result.set(absPath, lineMap);
+    }
+  }
+
+  return result;
+}
+
+/**
  * Look up blame info for a specific line in a file.
  * Uses a cached blame map to avoid repeated git calls.
+ *
+ * @deprecated Use batchGetBlameInfoForFiles() for better performance when processing multiple files.
+ * Kept for backward compatibility.
  */
 export function lookupBlame(
   blameCache: Map<string, Map<number, BlameInfo>>,
@@ -293,7 +494,8 @@ export function scanRepo(options: ScanOptions = {}): ScanResult {
     allMarkers.push(...fileMarkers);
   }
 
-  // Batch git blame: collect unique files and fetch blame for each
+  // Batch git blame: collect unique files and fetch blame for each,
+  // caching results per file to avoid repeated git calls.
   const blameCache = new Map<string, Map<number, BlameInfo>>();
 
   // Build TodoEntry objects with blame info and staleness
