@@ -110,6 +110,51 @@ function formatText(result: ScanResult): string {
   return output;
 }
 
+function formatMd(result: ScanResult): string {
+  if (result.entries.length === 0) {
+    return '# TODO Task List\n\nNo TODO markers found.\n';
+  }
+
+  let output = '# TODO Task List\n\n';
+
+  // Summary section
+  output += '## Summary\n\n';
+  output += `- **Total:** ${result.total} markers\n`;
+  output += `- **Files:** ${result.byFile.size}\n`;
+  output += `- **Authors:** ${result.byAuthor.size}\n`;
+  if (result.staleCount > 0) {
+    output += `- **Stale:** ${result.staleCount}\n`;
+  }
+  output += '\n';
+
+  // Grouped by file
+  output += '## TODOs by File\n\n';
+  for (const [file, fileEntries] of result.byFile) {
+    output += `### ${file} (${fileEntries.length} marker${fileEntries.length === 1 ? '' : 's'})\n\n`;
+    for (const e of fileEntries) {
+      const staleTag = e.isStale ? ' [STALE]' : '';
+      const blameInfo = e.blame
+        ? ` (${e.blame.author} · ${e.ageDays}d ago · ${e.blame.commitHash.slice(0, 7)})`
+        : ' (no git blame)';
+      output += `- [ ] [${e.line}] ${e.marker}: ${e.text}${staleTag}${blameInfo}\n`;
+    }
+    output += '\n';
+  }
+
+  // Grouped by author
+  output += '## TODOs by Author\n\n';
+  for (const [author, authorEntries] of result.byAuthor) {
+    output += `### ${author} (${authorEntries.length} marker${authorEntries.length === 1 ? '' : 's'})\n\n`;
+    for (const e of authorEntries) {
+      const staleTag = e.isStale ? ' [STALE]' : '';
+      output += `- [ ] ${e.file}:${e.line} [${e.marker}] ${e.text}${staleTag}\n`;
+    }
+    output += '\n';
+  }
+
+  return output;
+}
+
 function formatJson(entries: ScanResult['entries']): string {
   return JSON.stringify(entries, null, 2) + '\n';
 }
@@ -131,6 +176,8 @@ async function main() {
   const format = flags.format ?? 'text';
   if (format === 'json') {
     process.stdout.write(formatJson(result.entries));
+  } else if (format === 'md') {
+    process.stdout.write(formatMd(result));
   } else {
     process.stdout.write(formatText(result));
   }
