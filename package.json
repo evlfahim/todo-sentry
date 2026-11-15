@@ -8,7 +8,7 @@
     "todo-sentry": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/cli.js",
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

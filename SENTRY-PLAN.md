@@ -42,6 +42,6 @@ Core engine in src/engine.ts exports scanRepo function; VS Code plugin imports t
 - [x] 11. Optimize git blame performance by batching file paths and handling errors gracefully for unreadable files or non-git dirs.
 - [x] 12. Create a stub src/plugin-api.ts that re-exports the engine, demonstrating how a VS Code extension would import and call scanRepo.
 - [x] 13. Run full test suite and linting checks to ensure code quality and zero-dependency compliance.
-- [ ] 14. Add executable permissions and package bin configuration, verifying npx todo-sentry scan . works globally.
+- [x] 14. Add executable permissions and package bin configuration, verifying npx todo-sentry scan . works globally.
 - [ ] 15. Write comprehensive usage examples in examples/ directory covering CLI, JSON, MD, and changed-files modes.
 - [ ] 16. Write README.md with installation, usage, features, and a dedicated section explaining how to wrap src/engine.ts into a VS Code plugin.
