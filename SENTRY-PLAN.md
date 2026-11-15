@@ -32,7 +32,7 @@ Core engine in src/engine.ts exports scanRepo function; VS Code plugin imports t
 - [x] 1. Initialize TypeScript project with zero dependencies, configure Vitest, and verify build/test pipeline with npm test.
 - [x] 2. Implement regex-based scanner in src/engine.ts that extracts TODO/FIXME/HACK/XXX markers with line numbers and text, passing unit tests.
 - [x] 3. Add git blame integration to src/engine.ts that fetches author, date, and commit hash for each marked line, verifying output with node dist/cli.js scan .
-- [ ] 4. Implement age calculation logic and staleness threshold filtering, enabling --stale-days flag to flag old comments.
+- [x] 4. Implement age calculation logic and staleness threshold filtering, enabling --stale-days flag to flag old comments.
 - [ ] 5. Build grouping logic to organize results by file and author, ensuring output structure supports hierarchical views.
 - [ ] 6. Implement Markdown Task List formatter that exports grouped results as actionable - [ ] items, verified by node dist/cli.js scan . --format md > todos.md.
 - [ ] 7. Add JSON output format and CLI argument parsing for markers, extensions, and output format, passing integration tests.

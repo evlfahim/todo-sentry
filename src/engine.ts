@@ -254,7 +254,7 @@ export function lookupBlame(
 /**
  * Calculate the age in days from a date string.
  */
-function calculateAgeDays(dateStr: string): number {
+export function calculateAgeDays(dateStr: string): number {
   const now = new Date();
   const then = new Date(dateStr);
   const diffMs = now.getTime() - then.getTime();

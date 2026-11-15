@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo, getBlameInfoForFile, lookupBlame, BlameInfo } from '../src/engine';
+import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo, getBlameInfoForFile, lookupBlame, calculateAgeDays, BlameInfo } from '../src/engine';
 
 describe('buildMarkerPattern', () => {
   it('should match TODO markers', () => {
@@ -361,6 +361,221 @@ describe('getBlameInfoForFile', () => {
 
     const blameMap = getBlameInfoForFile(filePath);
     expect(blameMap.size).toBe(0);
+  });
+});
+
+describe('calculateAgeDays', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-sentry-age-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('should calculate age correctly for a recent commit', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: recent\n');
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    const blameMap = getBlameInfoForFile(filePath);
+    const blame = blameMap.get(1);
+    expect(blame).not.toBeNull();
+
+    const ageDays = calculateAgeDays(blame!.date);
+
+    // A freshly committed file should be 0 or 1 day old
+    expect(ageDays).toBeGreaterThanOrEqual(0);
+    expect(ageDays).toBeLessThanOrEqual(1);
+  });
+
+  it('should calculate age correctly for an old commit', () => {
+    const repoDir = path.join(tmpDir, 'repo2');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: old\n');
+
+    // Create a commit with a date 200 days ago
+    const oldDate = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000);
+    const env = { ...process.env, GIT_AUTHOR_DATE: oldDate.toISOString(), GIT_COMMITTER_DATE: oldDate.toISOString() };
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir, env });
+    execFileSync('git', ['commit', '-m', 'old commit'], { cwd: repoDir, env });
+
+    const blameMap = getBlameInfoForFile(filePath);
+    const blame = blameMap.get(1);
+    expect(blame).not.toBeNull();
+
+    const ageDays = calculateAgeDays(blame!.date);
+
+    expect(ageDays).toBeGreaterThanOrEqual(199);
+    expect(ageDays).toBeLessThanOrEqual(201);
+  });
+});
+
+describe('staleness filtering', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-sentry-stale-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('should mark entries as stale when age exceeds staleDays threshold', async () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: old task\n');
+
+    // Create a commit with a date 100 days ago
+    const oldDate = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000);
+    const env = { ...process.env, GIT_AUTHOR_DATE: oldDate.toISOString(), GIT_COMMITTER_DATE: oldDate.toISOString() };
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir, env });
+    execFileSync('git', ['commit', '-m', 'old commit'], { cwd: repoDir, env });
+
+    // With staleDays=90, this should be stale (100 > 90)
+    const result = await scanRepo({ root: repoDir, staleDays: 90 });
+
+    expect(result.total).toBe(1);
+    expect(result.entries[0].isStale).toBe(true);
+    expect(result.entries[0].ageDays).toBeGreaterThanOrEqual(99);
+    expect(result.staleCount).toBe(1);
+  });
+
+  it('should not mark entries as stale when age is within threshold', async () => {
+    const repoDir = path.join(tmpDir, 'repo2');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: recent\n');
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'recent commit'], { cwd: repoDir });
+
+    // With staleDays=90, a fresh commit should not be stale
+    const result = await scanRepo({ root: repoDir, staleDays: 90 });
+
+    expect(result.total).toBe(1);
+    expect(result.entries[0].isStale).toBe(false);
+    expect(result.staleCount).toBe(0);
+  });
+
+  it('should respect custom staleDays threshold', async () => {
+    const repoDir = path.join(tmpDir, 'repo3');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'test.js');
+    fs.writeFileSync(filePath, '// TODO: medium age\n');
+
+    // Create a commit with a date 50 days ago
+    const oldDate = new Date(Date.now() - 50 * 24 * 60 * 60 * 1000);
+    const env = { ...process.env, GIT_AUTHOR_DATE: oldDate.toISOString(), GIT_COMMITTER_DATE: oldDate.toISOString() };
+    execFileSync('git', ['add', 'test.js'], { cwd: repoDir, env });
+    execFileSync('git', ['commit', '-m', 'medium commit'], { cwd: repoDir, env });
+
+    // With staleDays=30, this should be stale (50 > 30)
+    const result = await scanRepo({ root: repoDir, staleDays: 30 });
+
+    expect(result.total).toBe(1);
+    expect(result.entries[0].isStale).toBe(true);
+    expect(result.staleCount).toBe(1);
+
+    // With staleDays=90, this should NOT be stale (50 < 90)
+    const result2 = await scanRepo({ root: repoDir, staleDays: 90 });
+
+    expect(result2.total).toBe(1);
+    expect(result2.entries[0].isStale).toBe(false);
+    expect(result2.staleCount).toBe(0);
+  });
+
+  it('should handle entries without git blame (untracked files)', async () => {
+    // Create a file in a git repo but don't commit it
+    const repoDir = path.join(tmpDir, 'repo4');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const filePath = path.join(repoDir, 'untracked.js');
+    fs.writeFileSync(filePath, '// TODO: untracked\n');
+
+    // Don't commit - file is untracked
+    const result = await scanRepo({ root: repoDir, staleDays: 90 });
+
+    expect(result.total).toBe(1);
+    expect(result.entries[0].blame).toBeNull();
+    expect(result.entries[0].ageDays).toBeNull();
+    expect(result.entries[0].isStale).toBe(false);
+    expect(result.staleCount).toBe(0);
+  });
+
+  it('should count stale entries correctly across multiple files', async () => {
+    const repoDir = path.join(tmpDir, 'repo5');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    // Create an old file (100 days ago)
+    const oldFile = path.join(repoDir, 'old.js');
+    fs.writeFileSync(oldFile, '// TODO: old task\n');
+    const oldDate = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000);
+    const env = { ...process.env, GIT_AUTHOR_DATE: oldDate.toISOString(), GIT_COMMITTER_DATE: oldDate.toISOString() };
+    execFileSync('git', ['add', 'old.js'], { cwd: repoDir, env });
+    execFileSync('git', ['commit', '-m', 'old'], { cwd: repoDir, env });
+
+    // Create a recent file
+    const recentFile = path.join(repoDir, 'recent.js');
+    fs.writeFileSync(recentFile, '// TODO: recent task\n');
+    execFileSync('git', ['add', 'recent.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'recent'], { cwd: repoDir });
+
+    // Create an untracked file
+    const untrackedFile = path.join(repoDir, 'untracked.js');
+    fs.writeFileSync(untrackedFile, '// TODO: untracked\n');
+
+    const result = await scanRepo({ root: repoDir, staleDays: 90 });
+
+    expect(result.total).toBe(3);
+    expect(result.staleCount).toBe(1); // Only the old file should be stale
   });
 });
 
