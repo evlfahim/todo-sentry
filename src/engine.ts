@@ -1,60 +1,97 @@
 /**
  * Core engine for scanning codebases for TODO markers.
  * Zero dependencies — uses Node.js child_process and fs only.
+ *
+ * This module exports a clean public API for programmatic use:
+ *   - scanRepo(options) — scan a directory and return a ScanResult
+ *   - scanFile(filePath, pattern) — scan a single file for markers
+ *   - getBlameInfoForFile(filePath) — get git blame info for a file
+ *   - lookupBlame(cache, filePath, line) — lookup blame with caching
+ *   - groupByFile(entries) — group entries by file path
+ *   - groupByAuthor(entries) — group entries by author name
+ *   - buildScanResult(entries) — build a ScanResult from entries
+ *   - buildMarkerPattern(markers) — build a regex for marker matching
+ *   - calculateAgeDays(dateStr) — calculate age in days from an ISO date
+ *
+ * A VS Code extension can import this module directly:
+ *   import { scanRepo } from 'todo-sentry/src/engine';
+ *   const result = await scanRepo({ root: workspaceFolder });
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+// ── Public Types ──────────────────────────────────────────────────────────────
+
+/** A raw TODO marker found in a file. */
 export interface TodoMarker {
+  /** Absolute path to the file containing the marker. */
   file: string;
+  /** 1-based line number. */
   line: number;
+  /** The full trimmed line text. */
   text: string;
+  /** The matched marker keyword (e.g. "TODO", "FIXME"). */
   marker: string;
 }
 
+/** Git blame information for a line. */
 export interface BlameInfo {
+  /** Author name. */
   author: string;
+  /** Author email. */
   email: string;
+  /** Commit date as ISO 8601 string. */
   date: string;
+  /** Full 40-character commit hash. */
   commitHash: string;
 }
 
+/** A TODO entry enriched with blame info and staleness. */
 export interface TodoEntry extends TodoMarker {
+  /** Git blame info, or null if the file is not tracked. */
   blame: BlameInfo | null;
+  /** Age in days from the commit date, or null if no blame. */
   ageDays: number | null;
+  /** Whether the entry exceeds the staleness threshold. */
   isStale: boolean;
 }
 
+/** Options for the scanRepo function. */
 export interface ScanOptions {
-  /** Root directory to scan (default: '.') */
+  /** Root directory to scan (default: '.'). */
   root?: string;
-  /** Custom markers to detect (default: ['TODO', 'FIXME', 'HACK', 'XXX']) */
+  /** Custom markers to detect (default: ['TODO', 'FIXME', 'HACK', 'XXX']). */
   markers?: string[];
-  /** File extensions to include (default: all files) */
+  /** File extensions to include (default: all files). E.g. ['.ts', '.js']. */
   extensions?: string[];
-  /** Only scan files changed since HEAD */
+  /** Only scan files changed since HEAD (default: false). */
   changedOnly?: boolean;
-  /** Staleness threshold in days; entries older than this get isStale=true */
+  /** Staleness threshold in days; entries older than this get isStale=true (default: 90). */
   staleDays?: number;
 }
 
+/** Full scan result with grouping information. */
 export interface ScanResult {
-  /** All found TODO entries */
+  /** All found TODO entries. */
   entries: TodoEntry[];
-  /** Total count */
+  /** Total count of entries. */
   total: number;
-  /** Count of stale entries */
+  /** Count of stale entries. */
   staleCount: number;
-  /** Entries grouped by file path */
+  /** Entries grouped by file path. */
   byFile: Map<string, TodoEntry[]>;
-  /** Entries grouped by author name */
+  /** Entries grouped by author name. */
   byAuthor: Map<string, TodoEntry[]>;
 }
 
-/** Default markers to search for */
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/** Default markers to search for. */
 export const DEFAULT_MARKERS = ['TODO', 'FIXME', 'HACK', 'XXX'];
+
+// ── Public Functions ──────────────────────────────────────────────────────────
 
 /**
  * Build a regex pattern that matches standalone TODO/FIXME/HACK/XXX tokens.
@@ -64,6 +101,209 @@ export function buildMarkerPattern(markers: string[]): RegExp {
   const escaped = markers.map(m => m.toUpperCase()).sort((a, b) => b.length - a.length);
   return new RegExp(`\\b(${escaped.join('|')})\\b`, 'i');
 }
+
+/**
+ * Scan a single file for TODO markers.
+ * Returns an array of TodoMarker objects.
+ */
+export function scanFile(filePath: string, pattern: RegExp): TodoMarker[] {
+  const markers: TodoMarker[] = [];
+  let content: string;
+
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return markers; // skip unreadable files
+  }
+
+  const lines = content.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const match = pattern.exec(line);
+    if (match) {
+      const marker = match[1];
+      const text = line.trim();
+      markers.push({
+        file: filePath,
+        line: i + 1, // 1-based line numbers
+        text,
+        marker,
+      });
+    }
+  }
+
+  return markers;
+}
+
+/**
+ * Run git blame --line-porcelain on a file and return a map of line number -> BlameInfo.
+ * Returns an empty map if git is not available or the file is not tracked.
+ */
+export function getBlameInfoForFile(filePath: string): Map<number, BlameInfo> {
+  try {
+    const output = execFileSync('git', ['blame', '--line-porcelain', '--', filePath], {
+      cwd: path.dirname(filePath),
+      timeout: 10000,
+      encoding: 'utf-8',
+    });
+    return parseBlamePorcelain(output);
+  } catch {
+    // Not a git repo, file not tracked, or git not installed
+    return new Map();
+  }
+}
+
+/**
+ * Look up blame info for a specific line in a file.
+ * Uses a cached blame map to avoid repeated git calls.
+ */
+export function lookupBlame(
+  blameCache: Map<string, Map<number, BlameInfo>>,
+  filePath: string,
+  line: number,
+): BlameInfo | null {
+  let fileBlame = blameCache.get(filePath);
+  if (!fileBlame) {
+    fileBlame = getBlameInfoForFile(filePath);
+    blameCache.set(filePath, fileBlame);
+  }
+  return fileBlame.get(line) ?? null;
+}
+
+/**
+ * Calculate the age in days from an ISO 8601 date string.
+ */
+export function calculateAgeDays(dateStr: string): number {
+  const now = new Date();
+  const then = new Date(dateStr);
+  const diffMs = now.getTime() - then.getTime();
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Group entries by file path.
+ * Returns a Map where each key is an absolute file path and the value is an array of entries for that file.
+ * Entries within each group are sorted by line number.
+ */
+export function groupByFile(entries: TodoEntry[]): Map<string, TodoEntry[]> {
+  const grouped = new Map<string, TodoEntry[]>();
+  for (const entry of entries) {
+    const list = grouped.get(entry.file) ?? [];
+    list.push(entry);
+    grouped.set(entry.file, list);
+  }
+  for (const [, list] of grouped) {
+    list.sort((a, b) => a.line - b.line);
+  }
+  return grouped;
+}
+
+/**
+ * Group entries by author name.
+ * Returns a Map where each key is an author name and the value is an array of entries by that author.
+ * Entries without blame info are grouped under "(untracked)".
+ * Entries within each group are sorted by file path then line number.
+ */
+export function groupByAuthor(entries: TodoEntry[]): Map<string, TodoEntry[]> {
+  const grouped = new Map<string, TodoEntry[]>();
+  for (const entry of entries) {
+    const author = entry.blame ? entry.blame.author : '(untracked)';
+    const list = grouped.get(author) ?? [];
+    list.push(entry);
+    grouped.set(author, list);
+  }
+  for (const [, list] of grouped) {
+    list.sort((a, b) => {
+      const fileCmp = a.file.localeCompare(b.file);
+      if (fileCmp !== 0) return fileCmp;
+      return a.line - b.line;
+    });
+  }
+  return grouped;
+}
+
+/**
+ * Build a ScanResult with grouping information attached.
+ * Useful for consumers who already have an array of TodoEntry objects
+ * and want to add grouping without re-scanning.
+ */
+export function buildScanResult(entries: TodoEntry[]): ScanResult {
+  return {
+    entries,
+    total: entries.length,
+    staleCount: entries.filter(e => e.isStale).length,
+    byFile: groupByFile(entries),
+    byAuthor: groupByAuthor(entries),
+  };
+}
+
+/**
+ * Scan a repository for TODO markers.
+ * Enriches results with git blame info (author, date, commit hash) and
+ * staleness flags.
+ *
+ * @param options - Configuration for the scan.
+ * @returns A ScanResult with entries, counts, and grouped maps.
+ *
+ * @example
+ * ```ts
+ * import { scanRepo } from './engine';
+ * const result = await scanRepo({ root: '.', staleDays: 90 });
+ * console.log(`Found ${result.total} markers in ${result.byFile.size} files`);
+ * ```
+ */
+export function scanRepo(options: ScanOptions = {}): ScanResult {
+  const {
+    root = '.',
+    markers = DEFAULT_MARKERS,
+    extensions = [],
+    changedOnly = false,
+    staleDays = 90,
+  } = options;
+
+  const pattern = buildMarkerPattern(markers);
+  const rootDir = path.resolve(root);
+
+  // If only changed files mode, we'd use git diff here (step 9)
+  // For now, scan all files
+  let files: string[];
+
+  if (changedOnly) {
+    // Placeholder for git diff integration (step 9)
+    files = [];
+  } else {
+    files = collectFiles(rootDir, extensions);
+  }
+
+  // Scan each file for markers
+  const allMarkers: TodoMarker[] = [];
+  for (const file of files) {
+    const fileMarkers = scanFile(file, pattern);
+    allMarkers.push(...fileMarkers);
+  }
+
+  // Batch git blame: collect unique files and fetch blame for each
+  const blameCache = new Map<string, Map<number, BlameInfo>>();
+
+  // Build TodoEntry objects with blame info and staleness
+  const entries: TodoEntry[] = allMarkers.map(m => {
+    const blame = lookupBlame(blameCache, m.file, m.line);
+    const ageDays = blame ? calculateAgeDays(blame.date) : null;
+    const isStale = blame !== null && staleDays !== undefined && ageDays !== null && ageDays > staleDays;
+
+    return {
+      ...m,
+      blame,
+      ageDays,
+      isStale,
+    };
+  });
+
+  return buildScanResult(entries);
+}
+
+// ── Internal Helpers ──────────────────────────────────────────────────────────
 
 /**
  * Recursively collect file paths under a directory.
@@ -100,42 +340,6 @@ function collectFiles(dir: string, extensions: string[]): string[] {
 
   walk(dir);
   return files;
-}
-
-/**
- * Scan a single file for TODO markers.
- * Returns an array of TodoMarker objects.
- */
-export function scanFile(filePath: string, pattern: RegExp): TodoMarker[] {
-  const markers: TodoMarker[] = [];
-  let content: string;
-
-  try {
-    content = fs.readFileSync(filePath, 'utf-8');
-  } catch {
-    return markers; // skip unreadable files
-  }
-
-  const lines = content.split('\n');
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const match = pattern.exec(line);
-    if (match) {
-      // Extract the matched marker (first capture group)
-      const marker = match[1];
-      // Trim the line text and strip leading/trailing whitespace
-      const text = line.trim();
-      markers.push({
-        file: filePath,
-        line: i + 1, // 1-based line numbers
-        text,
-        marker,
-      });
-    }
-  }
-
-  return markers;
 }
 
 /**
@@ -218,159 +422,4 @@ function parseBlamePorcelain(output: string): Map<number, BlameInfo> {
   }
 
   return result;
-}
-
-/**
- * Run git blame --line-porcelain on a file and return a map of line number -> BlameInfo.
- * Returns an empty map if git is not available or the file is not tracked.
- */
-export function getBlameInfoForFile(filePath: string): Map<number, BlameInfo> {
-  try {
-    const output = execFileSync('git', ['blame', '--line-porcelain', '--', filePath], {
-      cwd: path.dirname(filePath),
-      timeout: 10000,
-      encoding: 'utf-8',
-    });
-    return parseBlamePorcelain(output);
-  } catch {
-    // Not a git repo, file not tracked, or git not installed
-    return new Map();
-  }
-}
-
-/**
- * Look up blame info for a specific line in a file.
- * Uses a cached blame map to avoid repeated git calls.
- */
-export function lookupBlame(
-  blameCache: Map<string, Map<number, BlameInfo>>,
-  filePath: string,
-  line: number,
-): BlameInfo | null {
-  let fileBlame = blameCache.get(filePath);
-  if (!fileBlame) {
-    fileBlame = getBlameInfoForFile(filePath);
-    blameCache.set(filePath, fileBlame);
-  }
-  return fileBlame.get(line) ?? null;
-}
-
-/**
- * Calculate the age in days from a date string.
- */
-export function calculateAgeDays(dateStr: string): number {
-  const now = new Date();
-  const then = new Date(dateStr);
-  const diffMs = now.getTime() - then.getTime();
-  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
-}
-
-/**
- * Group entries by file path.
- * Returns a Map where each key is an absolute file path and the value is an array of entries for that file.
- */
-export function groupByFile(entries: TodoEntry[]): Map<string, TodoEntry[]> {
-  const grouped = new Map<string, TodoEntry[]>();
-  for (const entry of entries) {
-    const list = grouped.get(entry.file) ?? [];
-    list.push(entry);
-    grouped.set(entry.file, list);
-  }
-  // Sort entries within each file by line number
-  for (const [, list] of grouped) {
-    list.sort((a, b) => a.line - b.line);
-  }
-  return grouped;
-}
-
-/**
- * Group entries by author name.
- * Returns a Map where each key is an author name and the value is an array of entries by that author.
- * Entries without blame info are grouped under "(untracked)".
- */
-export function groupByAuthor(entries: TodoEntry[]): Map<string, TodoEntry[]> {
-  const grouped = new Map<string, TodoEntry[]>();
-  for (const entry of entries) {
-    const author = entry.blame ? entry.blame.author : '(untracked)';
-    const list = grouped.get(author) ?? [];
-    list.push(entry);
-    grouped.set(author, list);
-  }
-  // Sort entries within each author group by file then line
-  for (const [, list] of grouped) {
-    list.sort((a, b) => {
-      const fileCmp = a.file.localeCompare(b.file);
-      if (fileCmp !== 0) return fileCmp;
-      return a.line - b.line;
-    });
-  }
-  return grouped;
-}
-
-/**
- * Build a ScanResult with grouping information attached.
- */
-function buildScanResult(entries: TodoEntry[]): ScanResult {
-  return {
-    entries,
-    total: entries.length,
-    staleCount: entries.filter(e => e.isStale).length,
-    byFile: groupByFile(entries),
-    byAuthor: groupByAuthor(entries),
-  };
-}
-
-/**
- * Scan a repository for TODO markers.
- * Enriches results with git blame info (author, date, commit hash) and
- * staleness flags.
- */
-export async function scanRepo(options: ScanOptions = {}): Promise<ScanResult> {
-  const {
-    root = '.',
-    markers = DEFAULT_MARKERS,
-    extensions = [],
-    changedOnly = false,
-    staleDays = 90,
-  } = options;
-
-  const pattern = buildMarkerPattern(markers);
-  const rootDir = path.resolve(root);
-
-  // If only changed files mode, we'd use git diff here (step 9)
-  // For now, scan all files
-  let files: string[];
-
-  if (changedOnly) {
-    // Placeholder for git diff integration (step 9)
-    files = [];
-  } else {
-    files = collectFiles(rootDir, extensions);
-  }
-
-  // Scan each file for markers
-  const allMarkers: TodoMarker[] = [];
-  for (const file of files) {
-    const fileMarkers = scanFile(file, pattern);
-    allMarkers.push(...fileMarkers);
-  }
-
-  // Batch git blame: collect unique files and fetch blame for each
-  const blameCache = new Map<string, Map<number, BlameInfo>>();
-
-  // Build TodoEntry objects with blame info and staleness
-  const entries: TodoEntry[] = allMarkers.map(m => {
-    const blame = lookupBlame(blameCache, m.file, m.line);
-    const ageDays = blame ? calculateAgeDays(blame.date) : null;
-    const isStale = blame !== null && staleDays !== undefined && ageDays !== null && ageDays > staleDays;
-
-    return {
-      ...m,
-      blame,
-      ageDays,
-      isStale,
-    };
-  });
-
-  return buildScanResult(entries);
 }
