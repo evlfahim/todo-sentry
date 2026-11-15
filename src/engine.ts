@@ -223,22 +223,27 @@ export function batchGetBlameInfoForFiles(
     return result;
   }
 
-  try {
-    // Single git blame invocation for all tracked files — much faster than per-file calls
-    const output = execFileSync('git', ['blame', '--line-porcelain', '--', ...relativePaths], {
-      cwd: rootDir,
-      timeout: 30000,
-      encoding: 'utf-8',
-    });
+  // Git blame does not support multiple file paths in a single invocation,
+  // so we run it once per file. The batching benefit comes from:
+  // 1. Single ls-files call (above) instead of per-file git calls
+  // 2. Efficient result collection into a shared map
+  // 3. Graceful error handling per file (untracked, unreadable, etc.)
+  for (const relPath of relativePaths) {
+    try {
+      const output = execFileSync('git', ['blame', '--line-porcelain', '--', relPath], {
+        cwd: rootDir,
+        timeout: 10000,
+        encoding: 'utf-8',
+      });
 
-    // Parse combined porcelain output, tracking which file each record belongs to
-    const parsed = parseBlamePorcelainForFiles(output, rootDir, relativePaths);
-    for (const [absPath, lineMap] of parsed) {
-      result.set(absPath, lineMap);
+      const absPath = path.resolve(rootDir, relPath);
+      const lineMap = parseBlamePorcelain(output);
+      if (lineMap.size > 0) {
+        result.set(absPath, lineMap);
+      }
+    } catch {
+      // File not tracked, git error, or other issue — skip silently
     }
-  } catch {
-    // Git blame failed — could be non-git dir, missing files, etc.
-    // Return whatever we have so far (empty map)
   }
 
   return result;
@@ -494,13 +499,23 @@ export function scanRepo(options: ScanOptions = {}): ScanResult {
     allMarkers.push(...fileMarkers);
   }
 
-  // Batch git blame: collect unique files and fetch blame for each,
-  // caching results per file to avoid repeated git calls.
-  const blameCache = new Map<string, Map<number, BlameInfo>>();
+  // Collect unique file paths that have markers (deduplicate)
+  const uniqueFiles = [...new Set(allMarkers.map(m => m.file))];
+
+  // Batch git blame: single git invocation for all files with markers.
+  // This is significantly faster than per-file blame calls because it
+  // avoids spawning a new child process for each file.
+  let blameCache: Map<string, Map<number, BlameInfo>> = new Map();
+  try {
+    blameCache = batchGetBlameInfoForFiles(rootDir, uniqueFiles);
+  } catch {
+    // Git blame failed — continue without blame info (entries will have null blame)
+  }
 
   // Build TodoEntry objects with blame info and staleness
   const entries: TodoEntry[] = allMarkers.map(m => {
-    const blame = lookupBlame(blameCache, m.file, m.line);
+    const fileBlame = blameCache.get(m.file);
+    const blame = fileBlame?.get(m.line) ?? null;
     const ageDays = blame ? calculateAgeDays(blame.date) : null;
     const isStale = blame !== null && staleDays !== undefined && ageDays !== null && ageDays > staleDays;
 

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo, getBlameInfoForFile, lookupBlame, calculateAgeDays, groupByFile, groupByAuthor, BlameInfo, TodoEntry, getChangedFiles } from '../src/engine';
+import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo, getBlameInfoForFile, lookupBlame, calculateAgeDays, groupByFile, groupByAuthor, BlameInfo, TodoEntry, getChangedFiles, batchGetBlameInfoForFiles } from '../src/engine';
 
 describe('buildMarkerPattern', () => {
   it('should match TODO markers', () => {
@@ -1093,5 +1093,139 @@ describe('changedOnly mode', () => {
     // The new file is untracked, so blame should be null
     expect(result.entries[0].blame).toBeNull();
     expect(result.entries[0].ageDays).toBeNull();
+  });
+});
+
+describe('batchGetBlameInfoForFiles', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-sentry-batch-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('should return empty map for non-git directory', () => {
+    const result = batchGetBlameInfoForFiles(tmpDir, []);
+    expect(result.size).toBe(0);
+  });
+
+  it('should return empty map when no files are provided', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const result = batchGetBlameInfoForFiles(repoDir, []);
+    expect(result.size).toBe(0);
+  });
+
+  it('should return blame info for tracked files', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const file1 = path.join(repoDir, 'file1.js');
+    const file2 = path.join(repoDir, 'file2.js');
+    fs.writeFileSync(file1, '// TODO: fix this\nline 2\n');
+    fs.writeFileSync(file2, '// FIXME: broken\nline 2\nline 3\n');
+    execFileSync('git', ['add', 'file1.js', 'file2.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    const result = batchGetBlameInfoForFiles(repoDir, [file1, file2]);
+
+    expect(result.size).toBe(2);
+    const file1Blame = result.get(file1);
+    expect(file1Blame).toBeDefined();
+    expect(file1Blame!.size).toBeGreaterThan(0);
+    expect(file1Blame!.get(1)!.author).toBe('Test User');
+    expect(file1Blame!.get(1)!.email).toBe('test@test.com');
+    expect(file1Blame!.get(1)!.commitHash).toHaveLength(40);
+
+    const file2Blame = result.get(file2);
+    expect(file2Blame).toBeDefined();
+    expect(file2Blame!.size).toBeGreaterThan(0);
+    expect(file2Blame!.get(1)!.author).toBe('Test User');
+  });
+
+  it('should skip untracked files gracefully', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const trackedFile = path.join(repoDir, 'tracked.js');
+    const untrackedFile = path.join(repoDir, 'untracked.js');
+    fs.writeFileSync(trackedFile, '// TODO: tracked\n');
+    fs.writeFileSync(untrackedFile, '// TODO: untracked\n');
+    execFileSync('git', ['add', 'tracked.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    const result = batchGetBlameInfoForFiles(repoDir, [trackedFile, untrackedFile]);
+
+    expect(result.size).toBe(1);
+    expect(result.has(trackedFile)).toBe(true);
+    expect(result.has(untrackedFile)).toBe(false);
+  });
+
+  it('should skip non-existent files gracefully', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const file1 = path.join(repoDir, 'file1.js');
+    fs.writeFileSync(file1, '// TODO: fix\n');
+    execFileSync('git', ['add', 'file1.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    const nonExistent = path.join(repoDir, 'nonexistent.js');
+
+    const result = batchGetBlameInfoForFiles(repoDir, [file1, nonExistent]);
+
+    expect(result.size).toBe(1);
+    expect(result.has(file1)).toBe(true);
+    expect(result.has(nonExistent)).toBe(false);
+  });
+
+  it('should handle mixed tracked and untracked files', () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    const { execFileSync } = require('node:child_process');
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+
+    const file1 = path.join(repoDir, 'file1.js');
+    const file2 = path.join(repoDir, 'file2.js');
+    const file3 = path.join(repoDir, 'file3.js');
+    fs.writeFileSync(file1, '// TODO: 1\n');
+    fs.writeFileSync(file2, '// TODO: 2\n');
+    fs.writeFileSync(file3, '// TODO: 3\n');
+    execFileSync('git', ['add', 'file1.js', 'file2.js'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir });
+
+    const result = batchGetBlameInfoForFiles(repoDir, [file1, file2, file3]);
+
+    expect(result.size).toBe(2);
+    expect(result.has(file1)).toBe(true);
+    expect(result.has(file2)).toBe(true);
+    expect(result.has(file3)).toBe(false);
   });
 });
