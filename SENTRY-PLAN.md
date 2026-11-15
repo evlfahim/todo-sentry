@@ -44,4 +44,4 @@ Core engine in src/engine.ts exports scanRepo function; VS Code plugin imports t
 - [x] 13. Run full test suite and linting checks to ensure code quality and zero-dependency compliance.
 - [x] 14. Add executable permissions and package bin configuration, verifying npx todo-sentry scan . works globally.
 - [x] 15. Write comprehensive usage examples in examples/ directory covering CLI, JSON, MD, and changed-files modes.
-- [ ] 16. Write README.md with installation, usage, features, and a dedicated section explaining how to wrap src/engine.ts into a VS Code plugin.
+- [x] 16. Write README.md with installation, usage, features, and a dedicated section explaining how to wrap src/engine.ts into a VS Code plugin.
