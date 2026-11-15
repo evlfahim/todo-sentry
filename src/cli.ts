@@ -65,22 +65,17 @@ function parseArgs(args: string[]): Flags {
   return flags;
 }
 
-function formatText(entries: ScanResult['entries']): string {
-  if (entries.length === 0) {
+function formatText(result: ScanResult): string {
+  if (result.entries.length === 0) {
     return 'No TODO markers found.\n';
   }
 
-  // Group by file
-  const byFile = new Map<string, ScanResult['entries']>();
-  for (const entry of entries) {
-    const list = byFile.get(entry.file) ?? [];
-    list.push(entry);
-    byFile.set(entry.file, list);
-  }
-
   let output = '';
-  for (const [file, fileEntries] of byFile) {
-    output += `\n${file}:\n`;
+
+  // Grouped by file
+  output += '=== TODOs by File ===\n\n';
+  for (const [file, fileEntries] of result.byFile) {
+    output += `${file} (${fileEntries.length} marker${fileEntries.length === 1 ? '' : 's'}):\n`;
     for (const e of fileEntries) {
       const staleTag = e.isStale ? ' [STALE]' : '';
       const blameInfo = e.blame
@@ -88,12 +83,27 @@ function formatText(entries: ScanResult['entries']): string {
         : ' (no git blame)';
       output += `  - [${e.line}] ${e.marker}: ${e.text}${staleTag}${blameInfo}\n`;
     }
+    output += '\n';
   }
 
-  output += `\nTotal: ${entries.length} markers`;
-  if (entries.some((e: ScanResult['entries'][number]) => e.isStale)) {
-    const staleCount = entries.filter((e: ScanResult['entries'][number]) => e.isStale).length;
-    output += `, ${staleCount} stale`;
+  // Grouped by author
+  output += '=== TODOs by Author ===\n\n';
+  for (const [author, authorEntries] of result.byAuthor) {
+    output += `${author} (${authorEntries.length} marker${authorEntries.length === 1 ? '' : 's'}):\n`;
+    for (const e of authorEntries) {
+      const staleTag = e.isStale ? ' [STALE]' : '';
+      output += `  - ${e.file}:${e.line} [${e.marker}] ${e.text}${staleTag}\n`;
+    }
+    output += '\n';
+  }
+
+  // Summary
+  output += `=== Summary ===\n`;
+  output += `Total: ${result.total} markers\n`;
+  output += `Files: ${result.byFile.size}\n`;
+  output += `Authors: ${result.byAuthor.size}\n`;
+  if (result.staleCount > 0) {
+    output += `Stale: ${result.staleCount}\n`;
   }
   output += '\n';
 
@@ -117,13 +127,12 @@ async function main() {
   };
 
   const result = await scanRepo(scanOptions);
-  const entries = result.entries;
 
   const format = flags.format ?? 'text';
   if (format === 'json') {
-    process.stdout.write(formatJson(entries));
+    process.stdout.write(formatJson(result.entries));
   } else {
-    process.stdout.write(formatText(entries));
+    process.stdout.write(formatText(result));
   }
 }
 

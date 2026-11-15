@@ -47,6 +47,10 @@ export interface ScanResult {
   total: number;
   /** Count of stale entries */
   staleCount: number;
+  /** Entries grouped by file path */
+  byFile: Map<string, TodoEntry[]>;
+  /** Entries grouped by author name */
+  byAuthor: Map<string, TodoEntry[]>;
 }
 
 /** Default markers to search for */
@@ -262,6 +266,61 @@ export function calculateAgeDays(dateStr: string): number {
 }
 
 /**
+ * Group entries by file path.
+ * Returns a Map where each key is an absolute file path and the value is an array of entries for that file.
+ */
+export function groupByFile(entries: TodoEntry[]): Map<string, TodoEntry[]> {
+  const grouped = new Map<string, TodoEntry[]>();
+  for (const entry of entries) {
+    const list = grouped.get(entry.file) ?? [];
+    list.push(entry);
+    grouped.set(entry.file, list);
+  }
+  // Sort entries within each file by line number
+  for (const [, list] of grouped) {
+    list.sort((a, b) => a.line - b.line);
+  }
+  return grouped;
+}
+
+/**
+ * Group entries by author name.
+ * Returns a Map where each key is an author name and the value is an array of entries by that author.
+ * Entries without blame info are grouped under "(untracked)".
+ */
+export function groupByAuthor(entries: TodoEntry[]): Map<string, TodoEntry[]> {
+  const grouped = new Map<string, TodoEntry[]>();
+  for (const entry of entries) {
+    const author = entry.blame ? entry.blame.author : '(untracked)';
+    const list = grouped.get(author) ?? [];
+    list.push(entry);
+    grouped.set(author, list);
+  }
+  // Sort entries within each author group by file then line
+  for (const [, list] of grouped) {
+    list.sort((a, b) => {
+      const fileCmp = a.file.localeCompare(b.file);
+      if (fileCmp !== 0) return fileCmp;
+      return a.line - b.line;
+    });
+  }
+  return grouped;
+}
+
+/**
+ * Build a ScanResult with grouping information attached.
+ */
+function buildScanResult(entries: TodoEntry[]): ScanResult {
+  return {
+    entries,
+    total: entries.length,
+    staleCount: entries.filter(e => e.isStale).length,
+    byFile: groupByFile(entries),
+    byAuthor: groupByAuthor(entries),
+  };
+}
+
+/**
  * Scan a repository for TODO markers.
  * Enriches results with git blame info (author, date, commit hash) and
  * staleness flags.
@@ -313,9 +372,5 @@ export async function scanRepo(options: ScanOptions = {}): Promise<ScanResult> {
     };
   });
 
-  return {
-    entries,
-    total: entries.length,
-    staleCount: entries.filter(e => e.isStale).length,
-  };
+  return buildScanResult(entries);
 }

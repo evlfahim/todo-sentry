@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo, getBlameInfoForFile, lookupBlame, calculateAgeDays, BlameInfo } from '../src/engine';
+import { buildMarkerPattern, DEFAULT_MARKERS, scanFile, scanRepo, getBlameInfoForFile, lookupBlame, calculateAgeDays, groupByFile, groupByAuthor, BlameInfo, TodoEntry } from '../src/engine';
 
 describe('buildMarkerPattern', () => {
   it('should match TODO markers', () => {
@@ -623,5 +623,172 @@ describe('lookupBlame', () => {
     const result2 = lookupBlame(cache, filePath, 2);
     expect(result2).not.toBeNull();
     expect(cache.size).toBe(1); // Still one file in cache (cached)
+  });
+});
+
+describe('groupByFile', () => {
+  it('should group entries by file path', () => {
+    const entries: TodoEntry[] = [
+      { file: '/a.js', line: 1, text: '// TODO: a1', marker: 'TODO', blame: null, ageDays: null, isStale: false },
+      { file: '/b.js', line: 2, text: '// FIXME: b1', marker: 'FIXME', blame: null, ageDays: null, isStale: false },
+      { file: '/a.js', line: 5, text: '// TODO: a2', marker: 'TODO', blame: null, ageDays: null, isStale: false },
+    ];
+
+    const grouped = groupByFile(entries);
+
+    expect(grouped.size).toBe(2);
+    expect(grouped.get('/a.js')).toHaveLength(2);
+    expect(grouped.get('/b.js')).toHaveLength(1);
+    // Entries within a file should be sorted by line number
+    expect(grouped.get('/a.js')![0].line).toBe(1);
+    expect(grouped.get('/a.js')![1].line).toBe(5);
+  });
+
+  it('should return empty map for empty entries', () => {
+    const grouped = groupByFile([]);
+    expect(grouped.size).toBe(0);
+  });
+
+  it('should handle single entry', () => {
+    const entries: TodoEntry[] = [
+      { file: '/solo.js', line: 10, text: '// TODO: solo', marker: 'TODO', blame: null, ageDays: null, isStale: false },
+    ];
+
+    const grouped = groupByFile(entries);
+    expect(grouped.size).toBe(1);
+    expect(grouped.get('/solo.js')).toHaveLength(1);
+  });
+});
+
+describe('groupByAuthor', () => {
+  it('should group entries by author name', () => {
+    const entries: TodoEntry[] = [
+      { file: '/a.js', line: 1, text: '// TODO: a1', marker: 'TODO', blame: { author: 'Alice', email: 'a@b.com', date: new Date().toISOString(), commitHash: 'a'.repeat(40) }, ageDays: 10, isStale: false },
+      { file: '/b.js', line: 2, text: '// FIXME: b1', marker: 'FIXME', blame: { author: 'Bob', email: 'b@c.com', date: new Date().toISOString(), commitHash: 'b'.repeat(40) }, ageDays: 20, isStale: false },
+      { file: '/c.js', line: 3, text: '// TODO: c1', marker: 'TODO', blame: { author: 'Alice', email: 'a@b.com', date: new Date().toISOString(), commitHash: 'c'.repeat(40) }, ageDays: 30, isStale: false },
+    ];
+
+    const grouped = groupByAuthor(entries);
+
+    expect(grouped.size).toBe(2);
+    expect(grouped.get('Alice')).toHaveLength(2);
+    expect(grouped.get('Bob')).toHaveLength(1);
+  });
+
+  it('should group untracked entries under "(untracked)"', () => {
+    const entries: TodoEntry[] = [
+      { file: '/a.js', line: 1, text: '// TODO: a1', marker: 'TODO', blame: null, ageDays: null, isStale: false },
+      { file: '/b.js', line: 2, text: '// FIXME: b1', marker: 'FIXME', blame: { author: 'Alice', email: 'a@b.com', date: new Date().toISOString(), commitHash: 'a'.repeat(40) }, ageDays: 10, isStale: false },
+      { file: '/c.js', line: 3, text: '// TODO: c1', marker: 'TODO', blame: null, ageDays: null, isStale: false },
+    ];
+
+    const grouped = groupByAuthor(entries);
+
+    expect(grouped.size).toBe(2);
+    expect(grouped.get('(untracked)')).toHaveLength(2);
+    expect(grouped.get('Alice')).toHaveLength(1);
+  });
+
+  it('should return empty map for empty entries', () => {
+    const grouped = groupByAuthor([]);
+    expect(grouped.size).toBe(0);
+  });
+
+  it('should sort entries by file then line within author groups', () => {
+    const entries: TodoEntry[] = [
+      { file: '/z.js', line: 10, text: '// TODO: z10', marker: 'TODO', blame: { author: 'Alice', email: 'a@b.com', date: new Date().toISOString(), commitHash: 'a'.repeat(40) }, ageDays: 10, isStale: false },
+      { file: '/a.js', line: 5, text: '// FIXME: a5', marker: 'FIXME', blame: { author: 'Alice', email: 'a@b.com', date: new Date().toISOString(), commitHash: 'a'.repeat(40) }, ageDays: 10, isStale: false },
+      { file: '/a.js', line: 1, text: '// TODO: a1', marker: 'TODO', blame: { author: 'Alice', email: 'a@b.com', date: new Date().toISOString(), commitHash: 'a'.repeat(40) }, ageDays: 10, isStale: false },
+    ];
+
+    const grouped = groupByAuthor(entries);
+    const aliceEntries = grouped.get('Alice')!;
+
+    expect(aliceEntries).toHaveLength(3);
+    // Sorted by file first, then line
+    expect(aliceEntries[0].file).toBe('/a.js');
+    expect(aliceEntries[0].line).toBe(1);
+    expect(aliceEntries[1].file).toBe('/a.js');
+    expect(aliceEntries[1].line).toBe(5);
+    expect(aliceEntries[2].file).toBe('/z.js');
+    expect(aliceEntries[2].line).toBe(10);
+  });
+});
+
+describe('scanResult grouping', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'todo-sentry-group-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('should include byFile and byAuthor in ScanResult', async () => {
+    fs.writeFileSync(path.join(tmpDir, 'file1.js'), '// TODO: task1\n');
+    fs.writeFileSync(path.join(tmpDir, 'file2.js'), '// FIXME: task2\n');
+    fs.writeFileSync(path.join(tmpDir, 'file3.js'), '// TODO: task3\n');
+
+    const result = await scanRepo({ root: tmpDir });
+
+    expect(result.byFile).toBeDefined();
+    expect(result.byAuthor).toBeDefined();
+    expect(result.byFile.size).toBe(3);
+    expect(result.byAuthor.size).toBe(1); // All untracked, so one "(untracked)" group
+  });
+
+  it('should have correct grouping counts matching total', async () => {
+    fs.writeFileSync(path.join(tmpDir, 'a.js'), '// TODO: a\n// FIXME: b\n');
+    fs.writeFileSync(path.join(tmpDir, 'b.js'), '// HACK: c\n');
+
+    const result = await scanRepo({ root: tmpDir });
+
+    // Total entries should equal sum of all file groups
+    const fileGroupTotal = Array.from(result.byFile.values()).reduce((sum, arr) => sum + arr.length, 0);
+    expect(fileGroupTotal).toBe(result.total);
+
+    // Total entries should equal sum of all author groups
+    const authorGroupTotal = Array.from(result.byAuthor.values()).reduce((sum, arr) => sum + arr.length, 0);
+    expect(authorGroupTotal).toBe(result.total);
+  });
+
+  it('should group correctly in a git repo with multiple authors', async () => {
+    const { execFileSync } = require('node:child_process');
+
+    // Repo with author 1
+    const repoDir1 = path.join(tmpDir, 'repo1');
+    fs.mkdirSync(repoDir1, { recursive: true });
+    execFileSync('git', ['init'], { cwd: repoDir1 });
+    execFileSync('git', ['config', 'user.email', 'alice@test.com'], { cwd: repoDir1 });
+    execFileSync('git', ['config', 'user.name', 'Alice'], { cwd: repoDir1 });
+
+    const file1 = path.join(repoDir1, 'a.js');
+    fs.writeFileSync(file1, '// TODO: alice task\n');
+    execFileSync('git', ['add', 'a.js'], { cwd: repoDir1 });
+    execFileSync('git', ['commit', '-m', 'alice commit'], { cwd: repoDir1 });
+
+    // Repo with author 2
+    const repoDir2 = path.join(tmpDir, 'repo2');
+    fs.mkdirSync(repoDir2, { recursive: true });
+    execFileSync('git', ['init'], { cwd: repoDir2 });
+    execFileSync('git', ['config', 'user.email', 'bob@test.com'], { cwd: repoDir2 });
+    execFileSync('git', ['config', 'user.name', 'Bob'], { cwd: repoDir2 });
+
+    const file2 = path.join(repoDir2, 'b.js');
+    fs.writeFileSync(file2, '// FIXME: bob task\n');
+    execFileSync('git', ['add', 'b.js'], { cwd: repoDir2 });
+    execFileSync('git', ['commit', '-m', 'bob commit'], { cwd: repoDir2 });
+
+    // Scan both repos
+    const result1 = await scanRepo({ root: repoDir1 });
+    const result2 = await scanRepo({ root: repoDir2 });
+
+    expect(result1.byAuthor.get('Alice')).toHaveLength(1);
+    expect(result1.byAuthor.get('Alice')![0].file).toContain('a.js');
+
+    expect(result2.byAuthor.get('Bob')).toHaveLength(1);
+    expect(result2.byAuthor.get('Bob')![0].file).toContain('b.js');
   });
 });
